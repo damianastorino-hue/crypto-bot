@@ -6,9 +6,8 @@
 import asyncio
 import json
 import signal
-import sys
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 
 import websockets
 
@@ -21,24 +20,24 @@ import dashboard as dash
 
 # ============================================================
 #  Buffer de velas por símbolo
-#  { "BTCUSDT": deque([{open, high, low, close, volume}, ...]) }
 # ============================================================
 candle_buffer: dict[str, deque] = {
     sym: deque(maxlen=KLINE_BUFFER) for sym in SYMBOLS
 }
 
-# Vela en construcción (se agrega al buffer solo al cerrarse)
 current_candle: dict[str, dict | None] = {sym: None for sym in SYMBOLS}
+
+# Contador global de mensajes recibidos (diagnóstico)
+_msg_count = 0
 
 
 # ============================================================
 #  Procesamiento de mensaje WebSocket
 # ============================================================
 def process_kline(symbol: str, kline: dict):
-    """
-    Actualiza buffer con datos de la vela.
-    Solo agrega al buffer cuando la vela está cerrada (is_closed=True).
-    """
+    global _msg_count
+    _msg_count += 1
+
     is_closed = kline["x"]
     candle = {
         "open":   float(kline["o"]),
@@ -48,7 +47,7 @@ def process_kline(symbol: str, kline: dict):
         "volume": float(kline["v"]),
     }
 
-    current_candle[symbol] = candle  # siempre actualiza la vela viva
+    current_candle[symbol] = candle
 
     if is_closed:
         candle_buffer[symbol].append(candle)
@@ -57,23 +56,13 @@ def process_kline(symbol: str, kline: dict):
 
 
 def on_candle_close(symbol: str, price: float):
-    """
-    Ejecutado al cerrar cada vela.
-    1) Verifica SL/TP de posición abierta
-    2) Calcula indicadores
-    3) Genera señal
-    4) Abre posición si aplica
-    """
-    # --- Verificar salida primero ---
     check_exit_conditions(symbol, price)
 
-    # --- Calcular indicadores ---
     buf = list(candle_buffer[symbol])
     ind = compute_indicators(buf)
     if ind is None:
-        return  # no hay suficientes datos todavía
+        return
 
-    # --- Señal ---
     action, confirmations, detail = generate_signal(ind)
 
     if action != "HOLD":
@@ -83,19 +72,14 @@ def on_candle_close(symbol: str, price: float):
         )
         dash.push_signal(symbol, action, confirmations, detail, price)
 
-    # --- Abrir posición ---
     if action == "BUY":
         try_open_position(symbol, action, price, confirmations, detail)
 
 
 # ============================================================
-#  WebSocket — stream combinado de múltiples pares
+#  WebSocket — stream combinado (Binance REAL)
 # ============================================================
 def build_ws_url() -> str:
-    """
-    Combina todos los pares en un solo stream (más eficiente).
-    Formato: <symbol>@kline_<interval>
-    """
     streams = "/".join(
         f"{sym.lower()}@kline_{KLINE_INTERVAL}"
         for sym in SYMBOLS
@@ -105,26 +89,23 @@ def build_ws_url() -> str:
 
 async def listen():
     url = build_ws_url()
-    log.info(f"Conectando WebSocket: {len(SYMBOLS)} pares | {KLINE_INTERVAL}")
-    log.info(f"Pares: {', '.join(SYMBOLS)}")
-
+    log.info(f"WebSocket URL: {url[:60]}...")
     reconnect_delay = 5
 
     while True:
         try:
             async with websockets.connect(url, ping_interval=20, ping_timeout=30) as ws:
-                log.info("✅ WebSocket conectado")
-                reconnect_delay = 5  # reset
+                log.info("✅ WebSocket conectado a Binance REAL")
+                reconnect_delay = 5
 
                 async for raw_msg in ws:
                     msg = json.loads(raw_msg)
 
-                    # Stream combinado: { "stream": "btcusdt@kline_1m", "data": {...} }
                     if "data" not in msg:
                         continue
 
                     data   = msg["data"]
-                    symbol = data["s"]          # ej: "BTCUSDT"
+                    symbol = data["s"]
                     kline  = data["k"]
 
                     if symbol in candle_buffer:
@@ -136,31 +117,41 @@ async def listen():
             log.error(f"Error WebSocket: {e}. Reconectando en {reconnect_delay}s...")
 
         await asyncio.sleep(reconnect_delay)
-        reconnect_delay = min(reconnect_delay * 2, 60)  # backoff exponencial
+        reconnect_delay = min(reconnect_delay * 2, 60)
 
 
 # ============================================================
-#  Monitor periódico (log de estado cada 5 min)
+#  Monitor periódico
 # ============================================================
 async def status_monitor():
     while True:
-        await asyncio.sleep(30)  # actualiza balance cada 30s
-        n_pos = len(open_positions)
-        buffers_ok = sum(1 for b in candle_buffer.values() if len(b) >= 30)
+        await asyncio.sleep(30)
+        n_pos    = len(open_positions)
+        # Contar pares con AL MENOS 1 vela (no 30)
+        pares_vivos   = sum(1 for b in candle_buffer.values() if len(b) >= 1)
+        pares_listos  = sum(1 for b in candle_buffer.values() if len(b) >= 30)
+        now = datetime.now(timezone.utc).strftime('%H:%M:%S')
+
         log.info(
-            f"[STATUS] {datetime.utcnow().strftime('%H:%M:%S')} UTC | "
-            f"Posiciones abiertas: {n_pos} | "
-            f"Pares con datos: {buffers_ok}/{len(SYMBOLS)}"
+            f"[STATUS] {now} UTC | Pos: {n_pos} | "
+            f"Pares recibiendo: {pares_vivos}/20 | "
+            f"Pares listos (≥30 velas): {pares_listos}/20 | "
+            f"Msgs recibidos: {_msg_count}"
         )
+
         for sym, pos in open_positions.items():
             log.info(
                 f"  → {sym} entry:{pos['entry_price']:.4f} "
                 f"SL:{pos['stop_loss']:.4f} TP:{pos['take_profit']:.4f}"
             )
+
         # Sincronizar estado al dashboard
         dash.update_state("open_positions", dict(open_positions))
-        dash.update_state("candle_buffer", dict(candle_buffer))
-        dash.update_state("balance_usdt", get_balance("USDT"))
+        dash.update_state("candle_buffer",  dict(candle_buffer))
+        try:
+            dash.update_state("balance_usdt", get_balance("USDT"))
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -178,15 +169,13 @@ def handle_shutdown(loop):
 # ============================================================
 async def main():
     log.info("=" * 55)
-    log.info("  SCALPING BOT — Binance Testnet Spot")
+    log.info("  SCALPING BOT — Binance REAL Spot")
     log.info(f"  Pares: {len(SYMBOLS)} | Intervalo: {KLINE_INTERVAL}")
     log.info(f"  SL: -1.5% | TP: +2.5% | Max pos: 3")
     log.info("=" * 55)
 
-    # Inicializar buffer en dashboard
     dash.update_state("candle_buffer", dict(candle_buffer))
 
-    # Arrancar servidor web del dashboard
     from config import DASHBOARD_PORT
     dash.start_dashboard(host="0.0.0.0", port=DASHBOARD_PORT)
     log.info(f"  Dashboard: http://localhost:{DASHBOARD_PORT}")
@@ -202,12 +191,11 @@ if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    # Capturar Ctrl+C para cierre limpio
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, handle_shutdown, loop)
         except NotImplementedError:
-            pass  # Windows no soporta add_signal_handler
+            pass
 
     try:
         loop.run_until_complete(main())
