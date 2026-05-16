@@ -10,8 +10,8 @@ API_KEY    = os.getenv("BINANCE_API_KEY",    "TU_API_KEY_TESTNET")
 API_SECRET = os.getenv("BINANCE_API_SECRET", "TU_API_SECRET_TESTNET")
 
 # --- MODO --------------------------------------------------
-TESTNET  = os.getenv("TESTNET", "true").lower() == "true"
-BASE_URL = "https://testnet.binance.vision" if TESTNET else "https://api.binance.com"
+TESTNET  = False
+BASE_URL = "https://api.binance.com"
 
 # --- PARES A MONITOREAR ------------------------------------
 SYMBOLS = [
