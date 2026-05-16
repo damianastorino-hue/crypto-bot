@@ -164,13 +164,17 @@ def index():
 # ============================================================
 #  Arranque en hilo separado
 # ============================================================
-def start_dashboard(host="0.0.0.0", port=5000):
+_ready = threading.Event()
+
+def _run_flask(host, port):
     import logging
-    log = logging.getLogger("werkzeug")
-    log.setLevel(logging.ERROR)  # silenciar logs de Flask en consola
-    t = threading.Thread(
-        target=lambda: app.run(host=host, port=port, debug=False, use_reloader=False),
-        daemon=True
-    )
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+    _ready.set()
+    app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
+
+def start_dashboard(host="0.0.0.0", port=5000):
+    t = threading.Thread(target=_run_flask, args=(host, port), daemon=True)
     t.start()
+    _ready.wait(timeout=10)
+    time.sleep(1)
     return t
