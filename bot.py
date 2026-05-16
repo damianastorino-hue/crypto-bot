@@ -100,7 +100,7 @@ def build_ws_url() -> str:
         f"{sym.lower()}@kline_{KLINE_INTERVAL}"
         for sym in SYMBOLS
     )
-    return f"wss://testnet.binance.vision/stream?streams={streams}"
+    return f"wss://stream.binance.com:9443/stream?streams={streams}"
 
 
 async def listen():
