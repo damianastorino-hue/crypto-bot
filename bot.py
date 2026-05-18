@@ -13,7 +13,7 @@ import websockets
 
 from config import SYMBOLS, KLINE_INTERVAL, KLINE_BUFFER
 from indicators import compute_indicators, generate_signal
-from executor import try_open_position, check_exit_conditions, force_close_all, open_positions, get_balance
+from executor import try_open_position, check_exit_conditions, force_close_all, open_positions, get_balance, watch_positions
 from logger import log
 import dashboard as dash
 
@@ -159,6 +159,32 @@ async def status_monitor():
 
 
 # ============================================================
+#  VIGILANCIA EN TIEMPO REAL — cada 15 segundos
+# ============================================================
+async def position_watcher():
+    """
+    Loop independiente que verifica posiciones abiertas cada 15s
+    con precio actual de mercado (REST API).
+    Implementa trailing stop por momentum:
+      - Target alcanzado (≥TP%) + precio baja → VENDE
+      - Stop loss tocado → VENDE
+    """
+    await asyncio.sleep(15)  # espera inicial
+    while True:
+        if open_positions:
+            try:
+                closed = await asyncio.get_event_loop().run_in_executor(
+                    None, watch_positions
+                )
+                if closed:
+                    # Sincronizar dashboard inmediatamente
+                    dash.update_state("open_positions", dict(open_positions))
+            except Exception as e:
+                log.error(f"position_watcher error: {e}")
+        await asyncio.sleep(15)
+
+
+# ============================================================
 #  Shutdown limpio
 # ============================================================
 def handle_shutdown(loop):
@@ -175,7 +201,7 @@ async def main():
     log.info("=" * 55)
     log.info("  SCALPING BOT — Binance REAL Spot")
     log.info(f"  Pares: {len(SYMBOLS)} | Intervalo: {KLINE_INTERVAL}")
-    log.info(f"  SL: -1.5% | TP: +2.5% | Max pos: 3")
+    log.info(f"  SL: -1.5% | TP: +0.8% trailing | Max pos: 3 | Watch: 15s")
     log.info("=" * 55)
 
     dash.update_state("candle_buffer", dict(candle_buffer))
@@ -188,6 +214,7 @@ async def main():
     await asyncio.gather(
         listen(),
         status_monitor(),
+        position_watcher(),
     )
 
 
