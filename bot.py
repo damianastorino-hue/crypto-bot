@@ -52,11 +52,11 @@ def process_kline(symbol: str, kline: dict):
     if is_closed:
         candle_buffer[symbol].append(candle)
         log.debug(f"{symbol} vela cerrada | close={candle['close']:.4f} | buf={len(candle_buffer[symbol])}")
-        on_candle_close(symbol, candle["close"])
+        on_candle_close(symbol, candle["close"], candle["high"])
 
 
-def on_candle_close(symbol: str, price: float):
-    check_exit_conditions(symbol, price)
+def on_candle_close(symbol: str, price: float, high: float = None):
+    check_exit_conditions(symbol, price, high_price=high)
 
     buf = list(candle_buffer[symbol])
     ind = compute_indicators(buf)
