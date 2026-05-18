@@ -1,7 +1,6 @@
 # ============================================================
-#  MÓDULO: dashboard.py
-#  Servidor Flask — API de estado + sirve el dashboard HTML
-#  Corre en paralelo al bot (hilo separado)
+#  MÓDULO: dashboard.py  v2
+#  Flask API + semáforo de activos + posiciones con color
 # ============================================================
 
 import threading
@@ -13,11 +12,11 @@ import csv
 
 app = Flask(__name__, static_folder="static")
 
-# Referencia al estado compartido del bot (inyectado desde bot.py)
 _state = {
-    "open_positions": {},   # { symbol: { entry_price, quantity, stop_loss, take_profit } }
-    "candle_buffer":  {},   # { symbol: deque }
-    "last_signals":   [],   # últimas 50 señales [ {time, symbol, action, conf, indicators} ]
+    "open_positions": {},
+    "candle_buffer":  {},
+    "last_signals":   [],
+    "semaphore":      {},   # { symbol: { color, rsi, estado } }
     "balance_usdt":   0.0,
     "started_at":     datetime.now(timezone.utc).isoformat(),
 }
@@ -33,27 +32,50 @@ def update_state(key, value):
 def push_signal(symbol: str, action: str, confirmations: int, indicators: dict, price: float):
     with _lock:
         _state["last_signals"].insert(0, {
-            "time":         datetime.now(timezone.utc).strftime("%H:%M:%S"),
-            "symbol":       symbol,
-            "action":       action,
+            "time":          datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            "symbol":        symbol,
+            "action":        action,
             "confirmations": confirmations,
-            "price":        round(price, 4),
-            "rsi":          indicators.get("rsi", "—"),
-            "macd":         indicators.get("macd", "—"),
-            "ema":          indicators.get("ema", "—"),
+            "price":         round(price, 4),
+            "rsi":           indicators.get("rsi", "—"),
+            "macd":          indicators.get("macd", "—"),
+            "ema":           indicators.get("ema", "—"),
         })
-        # Mantener solo las últimas 50
         _state["last_signals"] = _state["last_signals"][:50]
 
 
-# --- Leer historial CSV ---
+def push_semaphore(symbol: str, action: str, rsi: float, estado: str, confirmations: int):
+    """
+    Actualiza el semáforo de cada par.
+    Verde  → BUY disparado
+    Amarillo → RSI_OK_ESPERANDO o ACERCANDOSE
+    Rojo   → sobrecomprado o NEUTRO sin señal
+    """
+    if action == "BUY":
+        color = "green"
+    elif action == "SELL":
+        color = "red"
+    elif estado in ("RSI_OK_ESPERANDO", "ACERCANDOSE"):
+        color = "yellow"
+    else:
+        color = "gray"
+
+    with _lock:
+        _state["semaphore"][symbol] = {
+            "color":  color,
+            "rsi":    round(rsi, 1),
+            "estado": estado,
+            "conf":   confirmations,
+        }
+
+
+# --- CSV helpers ---
 def read_trade_history(limit=20):
     trades = []
-    log_file = "trades.csv"
-    if not os.path.exists(log_file):
+    if not os.path.exists("trades.csv"):
         return trades
     try:
-        with open(log_file, "r") as f:
+        with open("trades.csv", "r") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
             for row in reversed(rows[-limit:]):
@@ -63,34 +85,29 @@ def read_trade_history(limit=20):
     return trades
 
 
-# --- Calcular P&L del día ---
 def calc_daily_pnl():
-    log_file = "trades.csv"
-    if not os.path.exists(log_file):
+    if not os.path.exists("trades.csv"):
         return 0.0, 0, 0
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     total_pnl = 0.0
-    wins = 0
-    losses = 0
+    wins = losses = 0
     try:
-        with open(log_file, "r") as f:
+        with open("trades.csv", "r") as f:
             reader = csv.DictReader(f)
             buys = {}
             for row in reader:
                 if not row["timestamp"].startswith(today):
                     continue
-                sym = row["symbol"]
+                sym    = row["symbol"]
                 action = row["action"]
-                price = float(row["price"])
+                price  = float(row["price"])
                 if action == "BUY":
                     buys[sym] = price
                 elif action.startswith("SELL") and sym in buys:
                     pnl = ((price - buys[sym]) / buys[sym]) * 100
                     total_pnl += pnl
-                    if pnl >= 0:
-                        wins += 1
-                    else:
-                        losses += 1
+                    wins   += 1 if pnl >= 0 else 0
+                    losses += 1 if pnl <  0 else 0
                     del buys[sym]
     except Exception:
         pass
@@ -104,55 +121,59 @@ def calc_daily_pnl():
 @app.route("/api/status")
 def api_status():
     with _lock:
-        positions = dict(_state["open_positions"])
-        signals   = list(_state["last_signals"])
-        balance   = _state["balance_usdt"]
-        started   = _state["started_at"]
+        positions  = dict(_state["open_positions"])
+        signals    = list(_state["last_signals"])
+        balance    = _state["balance_usdt"]
+        started    = _state["started_at"]
+        semaphore  = dict(_state["semaphore"])
+        buf        = dict(_state["candle_buffer"])
 
-    # Enriquecer posiciones con P&L flotante (necesita precio actual)
+    # Posiciones con P&L flotante y color
     pos_list = []
     for sym, pos in positions.items():
-        # precio actual: última vela del buffer
-        buf = _state["candle_buffer"].get(sym)
-        current_price = list(buf)[-1]["close"] if buf and len(buf) > 0 else pos["entry_price"]
-        pnl_pct = ((current_price - pos["entry_price"]) / pos["entry_price"]) * 100
+        b = buf.get(sym)
+        current = list(b)[-1]["close"] if b and len(b) > 0 else pos["entry_price"]
+        pnl_pct = ((current - pos["entry_price"]) / pos["entry_price"]) * 100
+        pos_color = "green" if pnl_pct > 0.3 else ("red" if pnl_pct < -0.5 else "yellow")
         pos_list.append({
-            "symbol":       sym,
-            "entry_price":  round(pos["entry_price"], 4),
-            "current_price": round(current_price, 4),
-            "quantity":     round(pos["quantity"], 6),
-            "stop_loss":    round(pos["stop_loss"], 4),
-            "take_profit":  round(pos["take_profit"], 4),
-            "pnl_pct":      round(pnl_pct, 2),
+            "symbol":        sym,
+            "entry_price":   round(pos["entry_price"], 4),
+            "current_price": round(current, 4),
+            "quantity":      round(pos["quantity"], 6),
+            "stop_loss":     round(pos["stop_loss"], 4),
+            "take_profit":   round(pos["take_profit"], 4),
+            "pnl_pct":       round(pnl_pct, 2),
+            "color":         pos_color,
         })
 
     pnl_day, wins, losses = calc_daily_pnl()
     trades = read_trade_history(20)
+    uptime = round((datetime.now(timezone.utc) -
+                    datetime.fromisoformat(started)).total_seconds() / 60, 1)
 
     return jsonify({
-        "status":           "running",
-        "started_at":       started,
-        "uptime_min":       round((datetime.now(timezone.utc) -
-                             datetime.fromisoformat(started)).total_seconds() / 60, 1),
-        "balance_usdt":     round(balance, 2),
-        "open_positions":   pos_list,
-        "last_signals":     signals[:15],
-        "pnl_day_pct":      pnl_day,
-        "wins_today":       wins,
-        "losses_today":     losses,
-        "trade_history":    trades,
-        "monitored_pairs":  len(_state["candle_buffer"]),
+        "status":          "running",
+        "started_at":      started,
+        "uptime_min":      uptime,
+        "balance_usdt":    round(balance, 2),
+        "open_positions":  pos_list,
+        "last_signals":    signals[:15],
+        "pnl_day_pct":     pnl_day,
+        "wins_today":      wins,
+        "losses_today":    losses,
+        "trade_history":   trades,
+        "monitored_pairs": len(buf),
+        "semaphore":       semaphore,
     })
 
 
 @app.route("/api/prices")
 def api_prices():
-    """Últimos precios de cierre de cada par."""
     prices = {}
     with _lock:
-        for sym, buf in _state["candle_buffer"].items():
-            if buf and len(buf) > 0:
-                prices[sym] = round(list(buf)[-1]["close"], 4)
+        for sym, b in _state["candle_buffer"].items():
+            if b and len(b) > 0:
+                prices[sym] = round(list(b)[-1]["close"], 4)
     return jsonify(prices)
 
 
