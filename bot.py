@@ -65,9 +65,13 @@ def on_candle_close(symbol: str, price: float):
 
     action, confirmations, detail = generate_signal(ind)
 
+    # Actualizar semáforo siempre (cada vela)
+    estado = detail.get("estado", "NEUTRO")
+    dash.push_semaphore(symbol, action, ind["rsi"], estado, confirmations)
+
     if action != "HOLD":
         log.info(
-            f"[SEÑAL] {symbol} → {action} | conf:{confirmations}/4 | "
+            f"[SEÑAL] {symbol} → {action} | conf:+{confirmations} | "
             f"RSI:{detail['rsi']} MACD:{detail['macd']} EMA:{detail['ema']}"
         )
         dash.push_signal(symbol, action, confirmations, detail, price)
