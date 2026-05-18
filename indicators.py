@@ -1,23 +1,24 @@
 # ============================================================
-#  MÓDULO: indicators.py
-#  Cálculo de indicadores técnicos sobre buffer OHLCV
+#  MÓDULO: indicators.py  v2
+#  Lógica de señal: Opción B — RSI obligatorio + 1 más
 # ============================================================
 
 import pandas as pd
 import pandas_ta as ta
+import numpy as np
 from config import (
     RSI_PERIOD, RSI_OVERSOLD, RSI_OVERBOUGHT,
     MACD_FAST, MACD_SLOW, MACD_SIGNAL,
     EMA_FAST, EMA_SLOW,
     BB_PERIOD, BB_STD,
+    SIGNAL_MODE,
 )
 
 
 def compute_indicators(ohlcv: list[dict]) -> dict | None:
     """
     Recibe lista de velas OHLCV (al menos 30).
-    Retorna dict con valores actuales de cada indicador,
-    o None si no hay suficientes datos.
+    Retorna dict con valores actuales, o None si faltan datos.
     """
     if len(ohlcv) < 30:
         return None
@@ -25,36 +26,30 @@ def compute_indicators(ohlcv: list[dict]) -> dict | None:
     df = pd.DataFrame(ohlcv, columns=["open", "high", "low", "close", "volume"])
     df = df.astype(float)
 
-    # --- RSI --------------------------------------------------
     df.ta.rsi(length=RSI_PERIOD, append=True)
-    rsi_col = f"RSI_{RSI_PERIOD}"
-
-    # --- MACD -------------------------------------------------
     df.ta.macd(fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL, append=True)
-    macd_col   = f"MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}"
-    signal_col = f"MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}"
-
-    # --- EMA --------------------------------------------------
     df.ta.ema(length=EMA_FAST, append=True)
     df.ta.ema(length=EMA_SLOW, append=True)
+    df.ta.bbands(length=BB_PERIOD, std=BB_STD, append=True)
+
+    rsi_col      = f"RSI_{RSI_PERIOD}"
+    macd_col     = f"MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}"
+    signal_col   = f"MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}"
     ema_fast_col = f"EMA_{EMA_FAST}"
     ema_slow_col = f"EMA_{EMA_SLOW}"
-
-    # --- Bollinger Bands --------------------------------------
-    df.ta.bbands(length=BB_PERIOD, std=BB_STD, append=True)
     bb_upper_col = f"BBU_{BB_PERIOD}_{BB_STD}_{BB_STD}"
     bb_lower_col = f"BBL_{BB_PERIOD}_{BB_STD}_{BB_STD}"
 
-    last  = df.iloc[-1]
-    prev  = df.iloc[-2]
-
-    # Verificar que todos los indicadores tienen valores
     required = [rsi_col, macd_col, signal_col, ema_fast_col,
                 ema_slow_col, bb_upper_col, bb_lower_col]
+
     if any(col not in df.columns for col in required):
         return None
     if df[required].iloc[-1].isna().any():
         return None
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
 
     return {
         "close":      float(last["close"]),
@@ -74,53 +69,62 @@ def compute_indicators(ohlcv: list[dict]) -> dict | None:
 
 def generate_signal(ind: dict) -> tuple[str, int, dict]:
     """
-    Evalúa indicadores y retorna:
-      - acción:        "BUY" | "SELL" | "HOLD"
-      - confirmaciones: int (0-4)
-      - detalle:       dict con estado de cada indicador
+    OPCIÓN B: RSI es condición OBLIGATORIA + mínimo 1 confirmación adicional.
 
-    Lógica:
-      BUY  requiere MIN_CONFIRMATIONS de 4 señales alcistas
-      SELL requiere MIN_CONFIRMATIONS de 4 señales bajistas
+    BUY:  RSI < RSI_OVERSOLD  AND  (MACD_cross_up OR golden_cross OR bb_touch_lower)
+    SELL: RSI > RSI_OVERBOUGHT AND  (MACD_cross_down OR death_cross OR bb_touch_upper)
+
+    Retorna: (acción, confirmaciones_adicionales, detalle)
     """
-    from config import MIN_CONFIRMATIONS
 
-    buy_signals  = {}
-    sell_signals = {}
+    # --- Calcular cada señal individual ---
+    rsi_buy  = ind["rsi"] < RSI_OVERSOLD
+    rsi_sell = ind["rsi"] > RSI_OVERBOUGHT
 
-    # 1. RSI
-    buy_signals["rsi"]  = ind["rsi"] < RSI_OVERSOLD
-    sell_signals["rsi"] = ind["rsi"] > RSI_OVERBOUGHT
-
-    # 2. MACD crossover (señal en vela actual vs anterior)
     macd_cross_up   = (ind["macd_prev"] < ind["sig_prev"]) and (ind["macd"] >= ind["macd_sig"])
     macd_cross_down = (ind["macd_prev"] > ind["sig_prev"]) and (ind["macd"] <= ind["macd_sig"])
-    buy_signals["macd"]  = macd_cross_up
-    sell_signals["macd"] = macd_cross_down
 
-    # 3. EMA golden/death cross
     golden_cross = (ind["ema_fast_p"] < ind["ema_slow_p"]) and (ind["ema_fast"] >= ind["ema_slow"])
     death_cross  = (ind["ema_fast_p"] > ind["ema_slow_p"]) and (ind["ema_fast"] <= ind["ema_slow"])
-    buy_signals["ema"]  = golden_cross
-    sell_signals["ema"] = death_cross
 
-    # 4. Bollinger Bands (toca o cruza banda)
-    buy_signals["bb"]  = ind["close"] <= ind["bb_lower"]
-    sell_signals["bb"] = ind["close"] >= ind["bb_upper"]
+    bb_buy  = ind["close"] <= ind["bb_lower"]
+    bb_sell = ind["close"] >= ind["bb_upper"]
 
-    buy_count  = sum(buy_signals.values())
-    sell_count = sum(sell_signals.values())
+    # --- Confirmaciones adicionales (sin contar RSI) ---
+    extra_buy  = sum([macd_cross_up,  golden_cross, bb_buy])
+    extra_sell = sum([macd_cross_down, death_cross,  bb_sell])
 
     detail = {
         "rsi":  f"{ind['rsi']:.1f}",
-        "macd": "↑cross" if buy_signals["macd"] else ("↓cross" if sell_signals["macd"] else "flat"),
-        "ema":  "golden" if buy_signals["ema"]  else ("death"  if sell_signals["ema"]  else "—"),
-        "bb":   f"close={ind['close']:.4f} L={ind['bb_lower']:.4f} U={ind['bb_upper']:.4f}",
+        "macd": "↑" if macd_cross_up  else ("↓" if macd_cross_down else "·"),
+        "ema":  "↑" if golden_cross   else ("↓" if death_cross     else "·"),
+        "bb":   "↓" if bb_buy        else ("↑" if bb_sell          else "·"),
     }
 
-    if buy_count >= MIN_CONFIRMATIONS:
-        return "BUY", buy_count, detail
-    elif sell_count >= MIN_CONFIRMATIONS:
-        return "SELL", sell_count, detail
+    if SIGNAL_MODE == "rsi_plus_one":
+        # RSI obligatorio + al menos 1 confirmación adicional
+        if rsi_buy and extra_buy >= 1:
+            return "BUY",  extra_buy, detail
+        elif rsi_sell and extra_sell >= 1:
+            return "SELL", extra_sell, detail
+        else:
+            # HOLD — pero informamos cuántas confirmaciones hay
+            # para el semáforo del dashboard
+            if rsi_buy:
+                detail["estado"] = "RSI_OK_ESPERANDO"   # amarillo
+            elif ind["rsi"] < 45:
+                detail["estado"] = "ACERCANDOSE"         # amarillo tenue
+            else:
+                detail["estado"] = "NEUTRO"              # gris
+            return "HOLD", extra_buy if rsi_buy else 0, detail
+
     else:
-        return "HOLD", max(buy_count, sell_count), detail
+        # Modo legacy: cualquier 3 de 4
+        buy_total  = int(rsi_buy)  + extra_buy
+        sell_total = int(rsi_sell) + extra_sell
+        if buy_total >= 3:
+            return "BUY",  buy_total,  detail
+        elif sell_total >= 3:
+            return "SELL", sell_total, detail
+        else:
+            return "HOLD", max(buy_total, sell_total), detail
