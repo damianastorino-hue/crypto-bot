@@ -64,6 +64,34 @@ def _round_quantity(symbol: str, raw_qty: float) -> float | None:
     return round(raw_qty, 6)
 
 
+def get_price_precision(symbol: str) -> int:
+    """
+    Retorna la cantidad de decimales del precio para este par.
+    Usa el tickSize del filtro PRICE_FILTER de Binance.
+    Ejemplo: NOT tickSize=0.000001 → precision=6
+             BTC tickSize=0.01    → precision=2
+    """
+    # Cache simple para no llamar a la API en cada vela
+    if symbol in _price_precision_cache:
+        return _price_precision_cache[symbol]
+    info = get_symbol_info(symbol)
+    precision = 8  # default conservador
+    if info:
+        for f in info.get("filters", []):
+            if f["filterType"] == "PRICE_FILTER":
+                tick = f["tickSize"].rstrip("0")
+                if "." in tick:
+                    precision = len(tick.split(".")[-1])
+                else:
+                    precision = 0
+                break
+    _price_precision_cache[symbol] = precision
+    log.debug(f"Precisión de precio {symbol}: {precision} decimales")
+    return precision
+
+_price_precision_cache: dict = {}
+
+
 def get_balance(asset: str = "USDT") -> float:
     """Consulta balance de un asset."""
     params = {"timestamp": _timestamp()}
@@ -147,8 +175,10 @@ def try_open_position(symbol: str, action: str, price: float,
     # Precio de ejecución real (puede diferir levemente)
     exec_price = float(result.get("fills", [{}])[0].get("price", price)) if result.get("fills") else price
 
-    stop_loss   = exec_price * (1 - STOP_LOSS_PCT)
-    take_profit = exec_price * (1 + TAKE_PROFIT_PCT)
+    # Redondear SL/TP a la precisión real del par
+    price_dec   = get_price_precision(symbol)
+    stop_loss   = round(exec_price * (1 - STOP_LOSS_PCT),  price_dec)
+    take_profit = round(exec_price * (1 + TAKE_PROFIT_PCT), price_dec)
 
     open_positions[symbol] = {
         "side":         "BUY",
