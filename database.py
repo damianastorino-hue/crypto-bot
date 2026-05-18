@@ -162,7 +162,7 @@ def load_recent_candles(symbol: str, limit: int = 100) -> list[dict]:
     return [dict(r) for r in reversed(rows)]
 
 
-def clean_old_candles(days: int = 3):
+def clean_old_candles(days: int = 60):
     """Borrar velas de más de X días para no crecer indefinidamente."""
     conn = get_conn()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
