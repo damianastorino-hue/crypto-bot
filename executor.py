@@ -164,7 +164,7 @@ def try_open_position(symbol: str, action: str, price: float,
     return True
 
 
-def check_exit_conditions(symbol: str, current_price: float) -> bool:
+def check_exit_conditions(symbol: str, current_price: float, high_price: float = None) -> bool:
     """
     Verifica SL/TP para posición abierta.
     Retorna True si cerró la posición.
@@ -174,8 +174,11 @@ def check_exit_conditions(symbol: str, current_price: float) -> bool:
 
     pos = open_positions[symbol]
 
-    hit_tp = current_price >= pos["take_profit"]
-    hit_sl = current_price <= pos["stop_loss"]
+    # TP: verificar con el MÁXIMO de la vela (no solo el cierre)
+    # Así capturamos el TP aunque el precio haya tocado y rebotado
+    check_price_tp = high_price if high_price else current_price
+    hit_tp = check_price_tp >= pos["take_profit"]
+    hit_sl = current_price  <= pos["stop_loss"]
 
     if not (hit_tp or hit_sl):
         return False
