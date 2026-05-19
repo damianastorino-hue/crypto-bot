@@ -262,6 +262,74 @@ def api_sync_positions():
         return jsonify({"ok": False, "message": str(e)}), 500
 
 
+@app.route("/api/db/signals")
+def api_db_signals():
+    """Últimas N señales de la DB — para análisis."""
+    limit  = int(request.args.get("limit", 200))
+    symbol = request.args.get("symbol", None)
+    try:
+        import database as db
+        conn = db.get_conn()
+        if symbol:
+            rows = conn.execute(
+                "SELECT * FROM signals WHERE symbol=? ORDER BY ts DESC LIMIT ?",
+                (symbol.upper(), limit)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM signals ORDER BY ts DESC LIMIT ?",
+                (limit,)).fetchall()
+        conn.close()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/db/trades")
+def api_db_trades():
+    """Historial completo de trades de la DB."""
+    limit = int(request.args.get("limit", 100))
+    try:
+        import database as db
+        conn = db.get_conn()
+        rows = conn.execute(
+            "SELECT * FROM trades ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+        conn.close()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/db/stats")
+def api_db_stats():
+    """Estadísticas generales de la DB."""
+    try:
+        import database as db
+        conn = db.get_conn()
+        n_signals = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+        n_trades  = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        n_candles = conn.execute("SELECT COUNT(*) FROM candles").fetchone()[0]
+        first_ts  = conn.execute("SELECT MIN(ts) FROM candles").fetchone()[0]
+        last_ts   = conn.execute("SELECT MAX(ts) FROM candles").fetchone()[0]
+        wins      = conn.execute("SELECT COUNT(*) FROM trades WHERE action LIKE 'SELL%' AND pnl_pct > 0").fetchone()[0]
+        losses    = conn.execute("SELECT COUNT(*) FROM trades WHERE action LIKE 'SELL%' AND pnl_pct <= 0").fetchone()[0]
+        avg_pnl   = conn.execute("SELECT AVG(pnl_pct) FROM trades WHERE action LIKE 'SELL%'").fetchone()[0]
+        conn.close()
+        return jsonify({
+            "signals_total":  n_signals,
+            "trades_total":   n_trades,
+            "candles_total":  n_candles,
+            "candles_desde":  first_ts,
+            "candles_hasta":  last_ts,
+            "wins":           wins,
+            "losses":         losses,
+            "win_rate_pct":   round(wins/(wins+losses)*100, 1) if (wins+losses) > 0 else 0,
+            "avg_pnl_pct":    round(avg_pnl, 3) if avg_pnl else 0,
+            "db_path":        db.DB_FILE,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/")
 def index():
     return send_from_directory("static", "dashboard.html")
