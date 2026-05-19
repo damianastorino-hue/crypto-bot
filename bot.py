@@ -15,7 +15,7 @@ from config import SYMBOLS, KLINE_INTERVAL, KLINE_BUFFER
 from indicators import compute_indicators, generate_signal
 from executor import (try_open_position, check_exit_conditions,
                       force_close_all, open_positions, get_balance,
-                      watch_positions)
+                      watch_positions, recover_positions_from_binance)
 from logger import log
 import dashboard as dash
 import database as db
@@ -228,6 +228,15 @@ async def main():
 
     # Inicializar SQLite
     db.init_db()
+
+    # Recuperar posiciones abiertas de Binance
+    try:
+        n_recovered = recover_positions_from_binance()
+        if n_recovered:
+            dash.update_state("open_positions", dict(open_positions))
+            log.info(f"✅ {n_recovered} posiciones recuperadas de Binance")
+    except Exception as e:
+        log.warning(f"No se pudo recuperar posiciones: {e}")
 
     # Reinicio inteligente
     recovered = load_candles_from_db()
