@@ -534,7 +534,7 @@
     <div class="panel-title" style="display:flex;align-items:center;gap:8px;">
       Posiciones Abiertas
       <span class="badge" id="pos-badge">0 / 3</span>
-      <button class="btn-sell-all" onclick="forceSellAll()" title="Cerrar todas las posiciones">⚠ CERRAR TODO</button>
+      <button class="btn-sell-all" onclick="syncPositions()" title="Sincronizar con Binance" style="background:rgba(0,212,255,0.1);border-color:rgba(0,212,255,0.4);color:var(--accent);margin-right:6px;">⟳ SINCRONIZAR</button><button class="btn-sell-all" onclick="forceSellAll()" title="Cerrar todas las posiciones">⚠ CERRAR TODO</button>
     </div>
     <div id="positions-container">
       <div class="no-data">// SIN POSICIONES ABIERTAS</div>
@@ -877,6 +877,24 @@ async function forceSell(symbol) {
     if (d.ok) fetchStatus();
   } catch(e) {
     showToast('Error de conexión', false);
+  }
+}
+
+// --- Sincronizar posiciones con Binance ---
+async function syncPositions() {
+  const btn = event.target;
+  btn.textContent = "⟳ ...";
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/sync_positions', { method: 'POST' });
+    const d = await r.json();
+    showToast(d.message, d.ok);
+    if (d.ok) fetchStatus();
+  } catch(e) {
+    showToast('Error de conexión', false);
+  } finally {
+    btn.textContent = "⟳ SINCRONIZAR";
+    btn.disabled = false;
   }
 }
 
