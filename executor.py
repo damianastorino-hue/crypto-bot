@@ -51,9 +51,20 @@ def _round_quantity(symbol: str, raw_qty: float) -> float | None:
         return None
     for f in info.get("filters", []):
         if f["filterType"] == "LOT_SIZE":
-            step = float(f["stepSize"])
-            precision = len(str(step).rstrip("0").split(".")[-1])
-            return round(raw_qty - (raw_qty % step), precision)
+            step      = float(f["stepSize"])
+            min_qty   = float(f.get("minQty", step))
+            # Calcular cantidad redondeada al stepSize
+            qty = raw_qty - (raw_qty % step)
+            # Si stepSize >= 1 → entero puro (TRX, XRP, DOGE, etc.)
+            if step >= 1:
+                qty = int(qty)
+            else:
+                precision = len(str(step).rstrip("0").split(".")[-1])
+                qty = round(qty, precision)
+            # Verificar mínimo
+            if qty < min_qty:
+                return None
+            return qty
     return round(raw_qty, 6)
 
 
@@ -177,11 +188,17 @@ def recover_positions_from_binance() -> int:
             place_market_order(symbol, "SELL", qty)
             continue
 
+        # Redondear cantidad al stepSize del par antes de guardar
+        qty_rounded = _round_quantity(symbol, qty)
+        if not qty_rounded or qty_rounded <= 0:
+            log.warning(f"{symbol}: cantidad inválida tras redondeo ({qty}), ignorando")
+            continue
+
         # Mantener la posición
         open_positions[symbol] = {
             "side":           "BUY",
             "entry_price":    entry_price,
-            "quantity":       qty,
+            "quantity":       qty_rounded,
             "stop_loss":      stop_loss,
             "take_profit":    take_profit,
             "peak_pnl":       max(0.0, pnl_pct),
@@ -346,8 +363,29 @@ def force_sell(symbol: str) -> bool:
     if symbol not in open_positions:
         log.warning(f"force_sell: {symbol} no está en posiciones abiertas")
         return False
-    price = get_current_price(symbol) or open_positions[symbol]["entry_price"]
-    log.warning(f"[FORCE SELL] {symbol} @ {price}")
+
+    pos   = open_positions[symbol]
+    price = get_current_price(symbol) or pos["entry_price"]
+
+    # Verificar cantidad real disponible en Binance (puede diferir del registro)
+    params = {"timestamp": _timestamp()}
+    params["signature"] = _sign(params)
+    try:
+        r    = requests.get(f"{BASE_URL}/api/v3/account",
+                            headers=_headers(), params=params, timeout=10)
+        bals = r.json().get("balances", [])
+        asset = symbol.replace("USDT", "")
+        for b in bals:
+            if b["asset"] == asset:
+                real_qty = float(b["free"])
+                if real_qty > 0 and abs(real_qty - pos["quantity"]) / pos["quantity"] > 0.01:
+                    log.warning(f"force_sell: ajustando qty {pos['quantity']} → {real_qty}")
+                    open_positions[symbol]["quantity"] = _round_quantity(symbol, real_qty) or real_qty
+                break
+    except Exception as e:
+        log.warning(f"force_sell: no pude verificar balance real: {e}")
+
+    log.warning(f"[FORCE SELL] {symbol} @ {price} qty:{open_positions[symbol]['quantity']}")
     return _close_position(symbol, "FORCE_SELL", price)
 
 
