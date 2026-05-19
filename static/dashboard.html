@@ -477,6 +477,29 @@
   .toast.show { display: block; }
   .toast.ok   { border-color: var(--accent2); color: var(--accent2); }
   .toast.err  { border-color: var(--red);     color: var(--red); }
+
+  /* ---- CONTROL BOT ---- */
+  .bot-controls {
+    display: flex; gap: 8px; align-items: center;
+  }
+  .btn-control {
+    font-family: var(--mono); font-size: 0.62rem;
+    padding: 4px 12px; border-radius: 2px; cursor: pointer;
+    letter-spacing: 1px; transition: all 0.2s; border: 1px solid;
+  }
+  .btn-start  { background: rgba(0,255,136,0.12); border-color: rgba(0,255,136,0.4); color: var(--accent2); }
+  .btn-pause  { background: rgba(245,197,24,0.12); border-color: rgba(245,197,24,0.4); color: var(--yellow); }
+  .btn-stop   { background: rgba(255,59,92,0.12);  border-color: rgba(255,59,92,0.4);  color: var(--red); }
+  .btn-sync   { background: rgba(0,212,255,0.1);   border-color: rgba(0,212,255,0.3);  color: var(--accent); }
+  .btn-control:hover { opacity: 0.8; transform: scale(0.98); }
+  .btn-control:disabled { opacity: 0.4; cursor: not-allowed; }
+  .bot-status-badge {
+    font-family: var(--mono); font-size: 0.6rem;
+    padding: 2px 8px; border-radius: 2px; letter-spacing: 1px;
+  }
+  .bsb-active  { background: rgba(0,255,136,0.15); color: var(--accent2); border: 1px solid rgba(0,255,136,0.3); }
+  .bsb-paused  { background: rgba(245,197,24,0.15); color: var(--yellow);  border: 1px solid rgba(245,197,24,0.3); }
+  .bsb-stopped { background: rgba(255,59,92,0.15);  color: var(--red);     border: 1px solid rgba(255,59,92,0.3); }
 </style>
 </head>
 <body>
@@ -489,6 +512,20 @@
       <div class="dot" id="dot"></div>
       <span id="status-text">CONECTANDO...</span>
     </div>
+    <div class="bot-controls">
+      <span class="bot-status-badge bsb-active" id="bot-status-badge">ACTIVO</span>
+      <button class="btn-control btn-start"  onclick="botControl('start')"        >▶ ACTIVAR</button>
+      <button class="btn-control btn-pause"  onclick="botControl('pause_buying')" >⏸ PAUSAR COMPRAS</button>
+      <button class="btn-control btn-stop"   onclick="botControl('stop')"         >⏹ DETENER</button>
+      <button class="btn-control btn-sync"   onclick="syncPositions()"            >⟳ SINCRONIZAR</button>
+    </div>
+    <button id="btn-toggle" onclick="toggleBot()"
+      style="background:rgba(0,255,136,0.1);border:1px solid rgba(0,255,136,0.4);
+             color:var(--accent2);font-family:var(--mono);font-size:0.65rem;
+             padding:4px 14px;border-radius:2px;cursor:pointer;letter-spacing:2px;
+             transition:all 0.3s;">
+      ⏸ PAUSAR
+    </button>
   </div>
   <div class="header-right">
     UPTIME <span id="uptime">—</span> &nbsp;|&nbsp;
@@ -773,7 +810,8 @@ async function fetchStatus() {
     const d = await r.json();
 
     // Header
-    document.getElementById("status-text").textContent = "ACTIVO";
+    document.getElementById("status-text").textContent = "CONECTADO";
+    updateBotStatusBadge(d.bot_active, d.buying_paused);
     document.getElementById("dot").style.background = "var(--accent2)";
     document.getElementById("uptime").textContent = fmtUptime(d.uptime_min);
     document.getElementById("pairs").textContent = d.monitored_pairs;
@@ -782,14 +820,23 @@ async function fetchStatus() {
     document.getElementById("balance").textContent =
       d.balance_usdt > 0 ? `$${d.balance_usdt}` : "—";
 
-    const pnlEl = document.getElementById("pnl");
-    if (d.pnl_day_pct !== 0) {
-      const sign = d.pnl_day_pct >= 0 ? "+" : "";
-      pnlEl.textContent = `${sign}${d.pnl_day_pct}%`;
-      pnlEl.className = "stat-value " + (d.pnl_day_pct >= 0 ? "green" : "red");
-    }
+    // P&L se actualiza desde /api/pnl (cálculo correcto)
     document.getElementById("winloss").textContent =
-      `✓${d.wins_today}  ✗${d.losses_today}`;
+      `✓${d.wins_today || 0}  ✗${d.losses_today || 0}`;
+
+    // Estado del botón ON/OFF
+    const btnToggle = document.getElementById("btn-toggle");
+    if (d.bot_active === false) {
+      btnToggle.textContent = "▶ ACTIVAR";
+      btnToggle.style.background = "rgba(255,59,92,0.1)";
+      btnToggle.style.borderColor = "rgba(255,59,92,0.4)";
+      btnToggle.style.color = "var(--red)";
+    } else {
+      btnToggle.textContent = "⏸ PAUSAR";
+      btnToggle.style.background = "rgba(0,255,136,0.1)";
+      btnToggle.style.borderColor = "rgba(0,255,136,0.4)";
+      btnToggle.style.color = "var(--accent2)";
+    }
 
     // Panels
     renderSemaphore(d.semaphore || {});
@@ -814,9 +861,37 @@ function animateBar() {
   }, 50);
 }
 
+// --- Fetch P&L corregido ---
+async function fetchPnl() {
+  try {
+    const r = await fetch("/api/pnl");
+    const d = await r.json();
+    const pnlEl = document.getElementById("pnl");
+    const sign  = d.pnl_pct >= 0 ? "+" : "";
+    pnlEl.textContent = `${sign}${d.pnl_pct}%`;
+    pnlEl.className   = "stat-value " + (d.pnl_pct >= 0 ? "green" : "red");
+    pnlEl.title       = `Ganancia: $${d.ganancia_usdt} / Capital: $${d.capital_total}`;
+    document.getElementById("winloss").textContent =
+      `✓${d.wins}  ✗${d.losses}  |  $${d.ganancia_usdt >= 0 ? "+" : ""}${d.ganancia_usdt}`;
+  } catch(e) {}
+}
+
+// --- Toggle bot ON/OFF ---
+async function toggleBot() {
+  try {
+    const r = await fetch('/api/toggle_bot', { method: 'POST' });
+    const d = await r.json();
+    showToast(d.message, d.ok);
+    fetchStatus();
+  } catch(e) {
+    showToast('Error de conexión', false);
+  }
+}
+
 // --- Loop principal ---
 function startLoop() {
   fetchStatus();
+  fetchPnl();
   renderPrices();
   animateBar();
   setInterval(() => {
@@ -824,6 +899,8 @@ function startLoop() {
     renderPrices();
     animateBar();
   }, REFRESH_MS);
+  // P&L cada 10 segundos
+  setInterval(fetchPnl, 10000);
 }
 
 
@@ -880,22 +957,51 @@ async function forceSell(symbol) {
   }
 }
 
+// --- Bot control ---
+async function botControl(action) {
+  const labels = { start: "ACTIVAR", pause_buying: "PAUSAR COMPRAS", stop: "DETENER" };
+  if (!confirm(`¿${labels[action]} el bot?`)) return;
+  try {
+    const r = await fetch('/api/bot_control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action })
+    });
+    const d = await r.json();
+    showToast(d.message, d.ok);
+    if (d.ok) {
+      updateBotStatusBadge(d.bot_active, d.buying_paused);
+      fetchStatus();
+    }
+  } catch(e) { showToast('Error de conexión', false); }
+}
+
+function updateBotStatusBadge(active, paused) {
+  const badge = document.getElementById('bot-status-badge');
+  const dot   = document.getElementById('dot');
+  if (!active) {
+    badge.textContent = 'DETENIDO';
+    badge.className   = 'bot-status-badge bsb-stopped';
+    dot.style.background = 'var(--red)';
+  } else if (paused) {
+    badge.textContent = 'COMPRAS PAUSADAS';
+    badge.className   = 'bot-status-badge bsb-paused';
+    dot.style.background = 'var(--yellow)';
+  } else {
+    badge.textContent = 'ACTIVO';
+    badge.className   = 'bot-status-badge bsb-active';
+    dot.style.background = 'var(--accent2)';
+  }
+}
+
 // --- Sincronizar posiciones con Binance ---
 async function syncPositions() {
-  const btn = event.target;
-  btn.textContent = "⟳ ...";
-  btn.disabled = true;
   try {
     const r = await fetch('/api/sync_positions', { method: 'POST' });
     const d = await r.json();
     showToast(d.message, d.ok);
     if (d.ok) fetchStatus();
-  } catch(e) {
-    showToast('Error de conexión', false);
-  } finally {
-    btn.textContent = "⟳ SINCRONIZAR";
-    btn.disabled = false;
-  }
+  } catch(e) { showToast('Error de conexión', false); }
 }
 
 // --- Force Sell All ---
