@@ -195,6 +195,18 @@ def api_force_sell(symbol):
         return jsonify({"ok": False, "message": str(e)}), 500
 
 
+@app.route("/api/sync_positions", methods=["POST"])
+def api_sync_positions():
+    """Sincroniza posiciones con Binance en tiempo real."""
+    try:
+        from executor import recover_positions_from_binance, open_positions
+        n = recover_positions_from_binance()
+        update_state("open_positions", dict(open_positions))
+        return jsonify({"ok": True, "message": f"Sincronizado — {n} posiciones activas"})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)}), 500
+
+
 @app.route("/api/force_sell_all", methods=["POST"])
 def api_force_sell_all():
     """Cierra todas las posiciones abiertas."""
