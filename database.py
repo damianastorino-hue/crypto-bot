@@ -9,7 +9,8 @@ import json
 from datetime import datetime, timezone, timedelta
 from logger import log
 
-DB_FILE = "scalping.db"
+import os
+DB_FILE = os.environ.get("DB_PATH", "scalping.db")
 
 
 def get_conn():
