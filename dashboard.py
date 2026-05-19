@@ -182,11 +182,15 @@ def api_force_sell(symbol):
     """Venta forzada manual de una posición específica."""
     try:
         from executor import force_sell
-        success = force_sell(symbol.upper())
+        sym = symbol.upper()
+        from executor import open_positions
+        if sym not in open_positions:
+            return jsonify({"ok": False, "message": f"{sym} ya fue vendido (trailing/SL/TP)"}), 400
+        success = force_sell(sym)
         if success:
-            update_state("open_positions", {})  # se sincroniza en próximo watch
-            return jsonify({"ok": True, "message": f"Vendido {symbol}"})
-        return jsonify({"ok": False, "message": f"{symbol} no está en posiciones abiertas"}), 400
+            update_state("open_positions", dict(open_positions))
+            return jsonify({"ok": True, "message": f"✅ {sym} vendido al mercado"})
+        return jsonify({"ok": False, "message": f"Error ejecutando orden de venta para {sym}"}), 500
     except Exception as e:
         return jsonify({"ok": False, "message": str(e)}), 500
 
