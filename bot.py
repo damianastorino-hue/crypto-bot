@@ -15,7 +15,8 @@ from config import SYMBOLS, KLINE_INTERVAL, KLINE_BUFFER
 from indicators import compute_indicators, generate_signal
 from executor import (try_open_position, check_exit_conditions,
                       force_close_all, open_positions, get_balance,
-                      watch_positions, recover_positions_from_binance)
+                      watch_positions, recover_positions_from_binance,
+                      preload_symbol_filters)
 from logger import log
 import dashboard as dash
 import database as db
@@ -108,7 +109,12 @@ def on_candle_close(symbol: str, price: float, high: float = None):
         dash.push_signal(symbol, action, confirmations, detail, price)
 
     if action == "BUY":
-        try_open_position(symbol, action, price, confirmations, detail)
+        if not dash.is_bot_active():
+            log.debug(f"Bot DETENIDO — BUY {symbol} ignorado")
+        elif dash.is_buying_paused():
+            log.debug(f"Compras PAUSADAS — BUY {symbol} ignorado")
+        else:
+            try_open_position(symbol, action, price, confirmations, detail)
 
 
 # ============================================================
@@ -152,7 +158,8 @@ async def listen():
 async def position_watcher():
     await asyncio.sleep(15)
     while True:
-        if open_positions:
+        # Trailing/SL solo si bot está activo (no en modo stop)
+        if open_positions and dash.is_bot_active():
             try:
                 closed = await asyncio.get_event_loop().run_in_executor(
                     None, watch_positions)
@@ -228,6 +235,10 @@ async def main():
 
     # Inicializar SQLite
     db.init_db()
+
+    # Precargar filtros de todos los pares (stepSize, tickSize)
+    # Una sola request para todos — evita errores LOT_SIZE en órdenes
+    preload_symbol_filters(SYMBOLS)
 
     # Recuperar posiciones abiertas de Binance
     try:
