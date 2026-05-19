@@ -110,6 +110,138 @@ def get_trade_amount() -> float:
     return amount
 
 
+
+# ============================================================
+#  RECUPERACIÓN DE POSICIONES AL REINICIO
+# ============================================================
+def recover_positions_from_binance() -> int:
+    """
+    Al arrancar, consulta Binance para detectar activos comprados.
+    Usa myTrades para obtener el precio de entrada real.
+    Evalúa si mantener o vender inmediatamente.
+    Retorna cantidad de posiciones recuperadas.
+    """
+    from config import SYMBOLS
+
+    log.info("Buscando posiciones abiertas en Binance...")
+
+    # 1. Traer balances
+    params = {"timestamp": _timestamp()}
+    params["signature"] = _sign(params)
+    try:
+        r = requests.get(f"{BASE_URL}/api/v3/account",
+                         headers=_headers(), params=params, timeout=10)
+        balances = r.json().get("balances", [])
+    except Exception as e:
+        log.error(f"recover: error obteniendo cuenta: {e}")
+        return 0
+
+    recovered = 0
+
+    for b in balances:
+        asset = b["asset"]
+        symbol = f"{asset}USDT"
+
+        # Solo pares que el bot monitorea
+        if symbol not in SYMBOLS:
+            continue
+
+        qty = float(b["free"]) + float(b["locked"])
+        if qty <= 0:
+            continue
+
+        # Precio actual
+        current_price = get_current_price(symbol)
+        if not current_price:
+            continue
+
+        value_usdt = qty * current_price
+        if value_usdt < 5:  # ignorar dust
+            continue
+
+        # 2. Buscar precio de entrada en myTrades
+        entry_price = _get_entry_price(symbol, qty)
+        if not entry_price:
+            entry_price = current_price  # fallback: usar precio actual
+            log.warning(f"{symbol}: no encontré precio de entrada, usando precio actual")
+
+        # 3. Calcular P&L actual
+        pnl_pct = ((current_price - entry_price) / entry_price) * 100
+        price_dec = get_price_precision(symbol)
+        stop_loss   = round(entry_price * (1 - STOP_LOSS_PCT),   price_dec)
+        take_profit = round(entry_price * (1 + TAKE_PROFIT_PCT), price_dec)
+
+        # 4. Evaluar si mantener o vender
+        if pnl_pct <= -STOP_LOSS_PCT * 100:
+            log.warning(f"{symbol}: recuperado en pérdida ({pnl_pct:+.2f}%) → vendiendo")
+            place_market_order(symbol, "SELL", qty)
+            continue
+
+        # Mantener la posición
+        open_positions[symbol] = {
+            "side":           "BUY",
+            "entry_price":    entry_price,
+            "quantity":       qty,
+            "stop_loss":      stop_loss,
+            "take_profit":    take_profit,
+            "peak_pnl":       max(0.0, pnl_pct),
+            "target_reached": pnl_pct >= TAKE_PROFIT_PCT * 100,
+            "prev_price":     current_price,
+            "amount_usdt":    value_usdt,
+            "recovered":      True,
+        }
+
+        log.info(
+            f"[RECUPERADO] {symbol} | entrada:{entry_price:.6f} | "
+            f"actual:{current_price:.6f} | P&L:{pnl_pct:+.2f}% | "
+            f"SL:{stop_loss:.6f} TP:{take_profit:.6f}"
+        )
+        recovered += 1
+
+    log.info(f"Posiciones recuperadas: {recovered}")
+    return recovered
+
+
+def _get_entry_price(symbol: str, qty: float) -> float | None:
+    """
+    Busca el precio promedio de entrada usando myTrades.
+    Toma las últimas órdenes BUY hasta cubrir la cantidad actual.
+    """
+    params = {
+        "symbol":    symbol,
+        "limit":     50,
+        "timestamp": _timestamp(),
+    }
+    params["signature"] = _sign(params)
+    try:
+        r = requests.get(f"{BASE_URL}/api/v3/myTrades",
+                         headers=_headers(), params=params, timeout=10)
+        trades = r.json()
+        if not isinstance(trades, list):
+            return None
+
+        # Ordenar de más reciente a más antiguo
+        trades.sort(key=lambda x: x["time"], reverse=True)
+
+        total_qty   = 0.0
+        total_cost  = 0.0
+
+        for t in trades:
+            if not t["isBuyer"]:
+                continue
+            t_qty   = float(t["qty"])
+            t_price = float(t["price"])
+            total_qty  += t_qty
+            total_cost += t_qty * t_price
+            if total_qty >= qty * 0.95:  # 95% de tolerancia
+                return total_cost / total_qty
+
+        return total_cost / total_qty if total_qty > 0 else None
+
+    except Exception as e:
+        log.error(f"myTrades error {symbol}: {e}")
+        return None
+
 def place_market_order(symbol: str, side: str, quantity: float) -> dict | None:
     params = {
         "symbol": symbol, "side": side,
