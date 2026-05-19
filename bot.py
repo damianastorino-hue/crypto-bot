@@ -213,13 +213,18 @@ async def status_monitor():
 #  SHUTDOWN
 # ============================================================
 def handle_shutdown(loop):
-    log.warning("Cerrando bot...")
+    """
+    Shutdown limpio — NO vende posiciones.
+    El bot se recupera solo al reiniciar vía recover_positions_from_binance().
+    Solo actualiza el heartbeat para que el reinicio inteligente funcione.
+    """
+    log.warning("Cerrando bot — posiciones abiertas se mantienen en Binance")
     try:
         db.update_heartbeat()
     except Exception:
         pass
-    force_close_all()
-    log.info("Bot detenido.")
+    log.info(f"Posiciones activas al cierre: {list(open_positions.keys())}")
+    log.info("Bot detenido. Al reiniciar se recuperarán automáticamente.")
     loop.stop()
 
 
@@ -232,6 +237,14 @@ async def main():
     log.info(f"  Pares: {len(SYMBOLS)} | Intervalo: {KLINE_INTERVAL}")
     log.info(f"  SL:-1.5% | TP:+0.8% trailing | MaxPos:{3} | Watch:15s")
     log.info("=" * 55)
+
+    # Usar volumen persistente de Railway si está disponible
+    import os
+    if os.path.exists("/data"):
+        os.environ["DB_PATH"] = "/data/scalping.db"
+        log.info("Usando volumen persistente /data/scalping.db")
+    else:
+        log.warning("Sin volumen persistente — DB en memoria local (se pierde al reiniciar)")
 
     # Inicializar SQLite
     db.init_db()
