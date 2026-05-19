@@ -19,6 +19,36 @@ from config import (
 # ============================================================
 open_positions: dict = {}
 _price_precision_cache: dict = {}
+_lot_size_cache: dict = {}   # { symbol: { step, min_qty, precision } }
+
+
+def preload_symbol_filters(symbols: list):
+    """
+    Precarga stepSize y tickSize de todos los pares al arrancar.
+    Una sola request a exchangeInfo para todos.
+    """
+    try:
+        r = requests.get(f"{BASE_URL}/api/v3/exchangeInfo", timeout=15)
+        data = r.json()
+        loaded = 0
+        for s in data.get("symbols", []):
+            sym = s["symbol"]
+            if sym not in symbols:
+                continue
+            for f in s.get("filters", []):
+                if f["filterType"] == "LOT_SIZE":
+                    step  = float(f["stepSize"])
+                    minq  = float(f.get("minQty", step))
+                    prec  = 0 if step >= 1 else len(str(step).rstrip("0").split(".")[-1])
+                    _lot_size_cache[sym] = {"step": step, "min_qty": minq, "precision": prec}
+                if f["filterType"] == "PRICE_FILTER":
+                    tick = f["tickSize"].rstrip("0")
+                    prec = len(tick.split(".")[-1]) if "." in tick else 0
+                    _price_precision_cache[sym] = prec
+            loaded += 1
+        log.info(f"Filtros precargados: {loaded}/{len(symbols)} pares")
+    except Exception as e:
+        log.error(f"preload_symbol_filters error: {e}")
 
 
 # --- Helpers REST ------------------------------------------
@@ -46,25 +76,29 @@ def get_symbol_info(symbol: str) -> dict | None:
 
 
 def _round_quantity(symbol: str, raw_qty: float) -> float | None:
+    """Redondea cantidad al stepSize. Usa cache si disponible."""
+    # Usar cache precargado (más rápido y confiable)
+    if symbol in _lot_size_cache:
+        c     = _lot_size_cache[symbol]
+        step  = c["step"]
+        qty   = raw_qty - (raw_qty % step)
+        qty   = int(qty) if step >= 1 else round(qty, c["precision"])
+        return qty if qty >= c["min_qty"] else None
+
+    # Fallback: consultar API
     info = get_symbol_info(symbol)
     if not info:
-        return None
+        return round(raw_qty, 0) if raw_qty >= 1 else round(raw_qty, 6)
     for f in info.get("filters", []):
         if f["filterType"] == "LOT_SIZE":
-            step      = float(f["stepSize"])
-            min_qty   = float(f.get("minQty", step))
-            # Calcular cantidad redondeada al stepSize
-            qty = raw_qty - (raw_qty % step)
-            # Si stepSize >= 1 → entero puro (TRX, XRP, DOGE, etc.)
-            if step >= 1:
-                qty = int(qty)
-            else:
-                precision = len(str(step).rstrip("0").split(".")[-1])
-                qty = round(qty, precision)
-            # Verificar mínimo
-            if qty < min_qty:
-                return None
-            return qty
+            step    = float(f["stepSize"])
+            min_qty = float(f.get("minQty", step))
+            qty     = raw_qty - (raw_qty % step)
+            qty     = int(qty) if step >= 1 else round(qty, len(str(step).rstrip("0").split(".")[-1]))
+            # Guardar en cache para próximas veces
+            _lot_size_cache[symbol] = {"step": step, "min_qty": min_qty,
+                                        "precision": 0 if step >= 1 else len(str(step).rstrip("0").split(".")[-1])}
+            return qty if qty >= min_qty else None
     return round(raw_qty, 6)
 
 
@@ -157,8 +191,14 @@ def recover_positions_from_binance() -> int:
         if symbol not in SYMBOLS:
             continue
 
-        qty = float(b["free"]) + float(b["locked"])
+        # Solo usar balance FREE — el locked no se puede vender
+        qty_free   = float(b["free"])
+        qty_locked = float(b["locked"])
+        qty = qty_free
+
         if qty <= 0:
+            if qty_locked > 0:
+                log.warning(f"{symbol}: tiene {qty_locked} locked (Earn/orden pendiente) — ignorando")
             continue
 
         # Precio actual
@@ -279,14 +319,69 @@ def place_market_order(symbol: str, side: str, quantity: float) -> dict | None:
         return None
 
 
+def _safe_sell_quantity(symbol: str, qty: float) -> float:
+    """
+    Obtiene la cantidad válida para vender.
+    Intenta obtener stepSize de Binance, si falla usa fallback inteligente.
+    """
+    try:
+        rounded = _round_quantity(symbol, qty)
+        if rounded and rounded > 0:
+            return rounded
+    except Exception:
+        pass
+    # Fallback: si el precio es < $1 (tokens baratos como MANA, TRX, DOGE)
+    # probablemente tiene stepSize=1 → usar entero
+    price = get_current_price(symbol) or 1.0
+    if price < 1.0:
+        return float(int(qty))  # entero puro
+    elif price < 10.0:
+        return round(qty, 1)
+    elif price < 100.0:
+        return round(qty, 2)
+    else:
+        return round(qty, 4)
+
+
+def _get_real_balance(symbol: str) -> float:
+    """Balance libre real del activo en Binance."""
+    asset = symbol.replace("USDT", "")
+    params = {"timestamp": _timestamp()}
+    params["signature"] = _sign(params)
+    try:
+        r = requests.get(f"{BASE_URL}/api/v3/account",
+                         headers=_headers(), params=params, timeout=10)
+        for b in r.json().get("balances", []):
+            if b["asset"] == asset:
+                return float(b["free"])
+    except Exception as e:
+        log.warning(f"_get_real_balance {symbol}: {e}")
+    return 0.0
+
+
 def _close_position(symbol: str, reason: str, current_price: float) -> bool:
-    """Ejecuta SELL y limpia la posición."""
+    """Ejecuta SELL consultando balance real antes de enviar la orden."""
     if symbol not in open_positions:
         return False
-    pos    = open_positions[symbol]
-    result = place_market_order(symbol, "SELL", pos["quantity"])
+    pos = open_positions[symbol]
+
+    # Consultar balance REAL en Binance
+    real_balance = _get_real_balance(symbol)
+    log.info(f"_close_position {symbol}: bot_qty={pos['quantity']} real_balance={real_balance}")
+
+    if real_balance <= 0:
+        log.error(f"{symbol}: balance real=0, eliminando posición huérfana")
+        del open_positions[symbol]
+        return False
+
+    # Usar el menor: lo que el bot cree vs lo que realmente hay
+    qty_to_sell = min(pos["quantity"], real_balance)
+    sell_qty    = _safe_sell_quantity(symbol, qty_to_sell)
+    log.info(f"{symbol}: vendiendo {sell_qty} (de {qty_to_sell} disponibles)")
+
+    result = place_market_order(symbol, "SELL", sell_qty)
     if not result:
-        log.error(f"Error cerrando {symbol}")
+        log.error(f"Error cerrando {symbol} sell_qty={sell_qty}")
         return False
 
     exec_price = float(result.get("fills", [{}])[0].get("price", current_price)) \
