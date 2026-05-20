@@ -820,18 +820,20 @@ async function fetchStatus() {
     document.getElementById("winloss").textContent =
       `✓${d.wins_today || 0}  ✗${d.losses_today || 0}`;
 
-    // Estado del botón ON/OFF
+    // Estado del botón ON/OFF (protegido con null check)
     const btnToggle = document.getElementById("btn-toggle");
-    if (d.bot_active === false) {
-      btnToggle.textContent = "▶ ACTIVAR";
-      btnToggle.style.background = "rgba(255,59,92,0.1)";
-      btnToggle.style.borderColor = "rgba(255,59,92,0.4)";
-      btnToggle.style.color = "var(--red)";
-    } else {
-      btnToggle.textContent = "⏸ PAUSAR";
-      btnToggle.style.background = "rgba(0,255,136,0.1)";
-      btnToggle.style.borderColor = "rgba(0,255,136,0.4)";
-      btnToggle.style.color = "var(--accent2)";
+    if (btnToggle) {
+      if (d.bot_active === false) {
+        btnToggle.textContent = "▶ ACTIVAR";
+        btnToggle.style.background = "rgba(255,59,92,0.1)";
+        btnToggle.style.borderColor = "rgba(255,59,92,0.4)";
+        btnToggle.style.color = "var(--red)";
+      } else {
+        btnToggle.textContent = "⏸ PAUSAR";
+        btnToggle.style.background = "rgba(0,255,136,0.1)";
+        btnToggle.style.borderColor = "rgba(0,255,136,0.4)";
+        btnToggle.style.color = "var(--accent2)";
+      }
     }
 
     // Panels
