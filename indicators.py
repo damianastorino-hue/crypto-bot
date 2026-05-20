@@ -36,9 +36,9 @@ def compute_indicators(ohlcv: list[dict]) -> dict | None:
     sig_col    = f"MACDs_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}"
     ema_f_col  = f"EMA_{EMA_FAST}"
     ema_s_col  = f"EMA_{EMA_SLOW}"
-    # pandas_ta genera BBU/BBL con el std como float, p.ej. BBU_20_2.0
-    bb_u_col   = f"BBU_{BB_PERIOD}_{BB_STD}"
-    bb_l_col   = f"BBL_{BB_PERIOD}_{BB_STD}"
+    # pandas_ta genera BBU/BBL repitiendo el std: BBU_20_2.0_2.0
+    bb_u_col   = f"BBU_{BB_PERIOD}_{BB_STD}_{BB_STD}"
+    bb_l_col   = f"BBL_{BB_PERIOD}_{BB_STD}_{BB_STD}"
 
     required = [rsi_col, macd_col, sig_col, ema_f_col, ema_s_col, bb_u_col, bb_l_col]
 
