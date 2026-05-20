@@ -1,5 +1,5 @@
 # ============================================================
-#  SCALPING BOT — indicators.py  v3
+#  SCALPING BOT — indicators.py  v3 
 #  RSI obligatorio + 1 confirmación adicional (Opción B)
 # ============================================================
 
