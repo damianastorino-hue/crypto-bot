@@ -1,6 +1,7 @@
 # ============================================================
-#  SCALPING BOT — database.py  v2
+#  SCALPING BOT — database.py  v2.1
 #  SQLite: candles, signals, trades, heartbeat
+#  DB_PATH se lee en tiempo real para respetar el volumen Railway
 # ============================================================
 
 import os
@@ -8,17 +9,34 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 from logger import log
 
-DB_FILE = os.environ.get("DB_PATH", "scalping.db")
+
+def _db_path() -> str:
+    """Lee la ruta en tiempo real — respeta cambios de bot.py al montar volumen."""
+    # Primero variable de entorno, luego auto-detectar volumen Railway
+    env = os.environ.get("DB_PATH", "")
+    if env:
+        return env
+    if os.path.isdir("/data"):
+        return "/data/scalping.db"
+    if os.path.isdir("/app/data"):
+        return "/app/data/scalping.db"
+    return "scalping.db"
+
+
+# Alias global — se actualiza en init_db()
+DB_FILE = "scalping.db"
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn = sqlite3.connect(_db_path(), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
     """Crea las tablas si no existen."""
+    global DB_FILE
+    DB_FILE = _db_path()
     with get_conn() as conn:
         conn.executescript('''
             CREATE TABLE IF NOT EXISTS signals (
@@ -35,7 +53,6 @@ def init_db():
                 action        TEXT,
                 confirmations INTEGER
             );
-
             CREATE TABLE IF NOT EXISTS trades (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts          TEXT NOT NULL,
@@ -49,7 +66,6 @@ def init_db():
                 pnl_pct     REAL,
                 reason      TEXT
             );
-
             CREATE TABLE IF NOT EXISTS candles (
                 id      INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts      TEXT NOT NULL,
@@ -60,9 +76,7 @@ def init_db():
                 close   REAL,
                 volume  REAL
             );
-
             CREATE INDEX IF NOT EXISTS idx_candles_sym_ts ON candles(symbol, ts);
-
             CREATE TABLE IF NOT EXISTS daily_summary (
                 date         TEXT PRIMARY KEY,
                 total_trades INTEGER,
@@ -73,13 +87,12 @@ def init_db():
                 worst_pair   TEXT,
                 fees_usdt    REAL
             );
-
             CREATE TABLE IF NOT EXISTS heartbeat (
                 id      INTEGER PRIMARY KEY CHECK (id = 1),
                 last_ts TEXT NOT NULL
             );
         ''')
-    log.info("✅ SQLite inicializado")
+    log.info(f"✅ SQLite inicializado: {DB_FILE}")
 
 
 # ============================================================
@@ -132,7 +145,6 @@ def save_candle(symbol: str, candle: dict):
 
 
 def load_recent_candles(symbol: str, limit: int = 100) -> list[dict]:
-    """Retorna las últimas `limit` velas en orden cronológico."""
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT open, high, low, close, volume "
@@ -142,7 +154,7 @@ def load_recent_candles(symbol: str, limit: int = 100) -> list[dict]:
     return [dict(r) for r in reversed(rows)]
 
 
-def clean_old_candles(days: int = 3):
+def clean_old_candles(days: int = 60):
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     with get_conn() as conn:
         conn.execute("DELETE FROM candles WHERE ts < ?", (cutoff,))
@@ -189,31 +201,27 @@ def save_trade(symbol: str, action: str, price: float, quantity: float,
 
 
 def get_daily_stats() -> dict:
-    """P&L del día actual (UTC)."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM trades WHERE ts LIKE ? ORDER BY ts",
             (f"{today}%",),
         ).fetchall()
-
-    buys      = {}
-    wins      = losses = 0
+    buys = {}
+    wins = losses = 0
     total_pnl = 0.0
     pair_pnl  = {}
-
     for row in rows:
         sym = row["symbol"]
         if row["action"] == "BUY":
             buys[sym] = row["price"]
         elif row["action"].startswith("SELL") and sym in buys:
             pnl = ((row["price"] - buys[sym]) / buys[sym]) * 100
-            total_pnl         += pnl
-            pair_pnl[sym]      = pair_pnl.get(sym, 0) + pnl
-            wins              += 1 if pnl >= 0 else 0
-            losses            += 1 if pnl <  0 else 0
+            total_pnl        += pnl
+            pair_pnl[sym]     = pair_pnl.get(sym, 0) + pnl
+            wins             += 1 if pnl >= 0 else 0
+            losses           += 1 if pnl <  0 else 0
             del buys[sym]
-
     return {
         "date":         today,
         "total_trades": wins + losses,
